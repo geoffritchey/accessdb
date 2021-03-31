@@ -21,13 +21,17 @@ connTime = pyodbc.connect(
 
 
 class Fk:
-    def __init__(self, pk, fk):
+    def __init__(self, pk, fk=None):
+        self.pk_table = "[" + pk + "]"
+        if fk is not None:
+            self.fk_table = "[" + fk + "]"
         self.pk = ''
         self.fk = ''
 
-    def add(self, pk, fk):
-        self.pk = self.pk + pk
-        self.fk = self.fk + fk
+    def add(self, pk, fk=None):
+        self.pk = self.pk + ", [" + pk + "]"
+        if fk is not None:
+            self.fk = self.fk + ", [" + fk + "]"
 
 
 def create_access():
@@ -41,6 +45,24 @@ def create_access():
 
         curs = connTime.cursor()
 
+        unique_keys = {}
+        curs.execute("""
+select TC.Constraint_Name as name, CC.Column_Name as column_name, cc.TABLE_NAME as table_name
+from information_schema.table_constraints TC
+    join information_schema.constraint_column_usage CC on TC.Constraint_Name = CC.Constraint_Name
+where TC.constraint_type = 'Unique'
+order by TC.Constraint_Name
+        """)
+        for x in curs.fetchall():
+            constraint = x[0]
+            column = x[1]
+            table = x[2]
+            item = unique_keys.get(constraint)
+            if item is None:
+                item = Fk(table)
+            item.add(column)
+            unique_keys.update({constraint: item})
+
         primary_keys = {}
         foreign_keys = {}
         for row in curs.tables(tableType='TABLE', schema='dbo').fetchall():
@@ -52,9 +74,9 @@ def create_access():
                     else:
                         query = query + f'[{column_data.column_name}] varchar({column_data.column_size}),'
                 elif column_data.type_name in ('numeric'):
-                    query = query + f'[{column_data.column_name}] float,'
+                    query = query + f'[{column_data.column_name}] int,'
                 elif column_data.type_name in ('tinyint'):
-                    query = query + f'[{column_data.column_name}] smallint,'
+                    query = query + f'[{column_data.column_name}] int,'
                 elif column_data.type_name in ('bit', 'datetime', 'int'):
                     query = query + f'[{column_data.column_name}] {column_data.type_name},'
                 elif column_data.type_name in ('numeric() identity', 'int identity'):
@@ -67,11 +89,26 @@ def create_access():
             for primary_key in curs.primaryKeys(table=row.table_name):
                 primary_keys.update({primary_key.table_name: str(primary_keys.get('primary_key.table_name') or '') + f", {primary_key.column_name}"})
             for foreign_key in curs.foreignKeys(table=row.table_name):
-                foreign_keys.update({foreign_key.fk_name: str(foreign_keys.get('foreign_key.fk_name') or Fk()).add(f", {primary_key.column_name}"})
+                item = foreign_keys.get('foreign_key.fk_name')
+                if item is None:
+                    item = Fk(foreign_key.pktable_name, foreign_key.fktable_name)
+                item.add(f"{foreign_key.pkcolumn_name}", f"{foreign_key.fkcolumn_name}")
+                foreign_keys.update({foreign_key.fk_name: item})
                 print(foreign_key)
 
         for item, value in primary_keys.items():
             query = f"alter table {item} add primary key ([{value[2:]}]);"
+            print(query)
+            newdb.Execute(query)
+
+        for item, value in unique_keys.items():
+            query = f"alter table {value.pk_table} add constraint {item} unique({value.pk[2:]});"
+            print(query)
+            if not value.pk_table.startswith("[sys"):
+                newdb.Execute(query)
+
+        for item, value in foreign_keys.items():
+            query = f"alter table {value.fk_table} add constraint {item} foreign key({value.fk[2:]}) references {value.pk_table}({value.pk[2:]});"
             print(query)
             newdb.Execute(query)
 
